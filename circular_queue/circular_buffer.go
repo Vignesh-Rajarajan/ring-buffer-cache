@@ -5,42 +5,46 @@ import (
 	"fmt"
 	"log"
 	"sync"
-	"time"
 )
 
 /*
 1 ensures that there is always at least one position left unoccupied between the head and the tail when the circular_queue wraps around.
 This helps distinguish between an empty circular_queue (head == tail) and a full circular_queue (head == tail + 1).
 */
-const leftMarginIdx = 1 //position reserved before the head pointer
+const (
+	leftMarginIdx   = 1
+	headerEntrySize = 4
+	minimumCapacity = 32 + headerEntrySize
+) //position reserved before the head pointer
 
 type ByteStorageQueue struct {
-	storage         []byte
-	capacity        int
-	head            int
-	tail            int
-	count           int
-	rightMargin     int
-	logger          *log.Logger
-	headerEntrySize int
-	headerBuff      []byte
-	mutex           sync.RWMutex
+	storage     []byte
+	capacity    int
+	head        int
+	tail        int
+	count       int
+	rightMargin int
+	logger      *log.Logger
+	headerBuff  []byte
+	mutex       sync.RWMutex
+	maxCapacity int
 }
 
-func NewByteStorageQueue(capacity int, logger *log.Logger) *ByteStorageQueue {
+func NewByteStorageQueue(capacity, maxCapacity int, logger *log.Logger) *ByteStorageQueue {
 	return &ByteStorageQueue{
-		storage:         make([]byte, capacity),
-		capacity:        capacity,
-		headerEntrySize: 4, // default value
-		headerBuff:      make([]byte, 4),
-		head:            leftMarginIdx,
-		tail:            leftMarginIdx,
-		logger:          logger,
-		mutex:           sync.RWMutex{},
+		storage:     make([]byte, capacity),
+		capacity:    capacity,
+		headerBuff:  make([]byte, 4),
+		head:        leftMarginIdx,
+		tail:        leftMarginIdx,
+		logger:      logger,
+		rightMargin: leftMarginIdx,
+		mutex:       sync.RWMutex{},
+		maxCapacity: maxCapacity,
 	}
 }
 
-func (q *ByteStorageQueue) Enqueue(data []byte) int {
+func (q *ByteStorageQueue) Enqueue(data []byte) (int, error) {
 	q.mutex.Lock()
 	defer q.mutex.Unlock()
 	dataLen := len(data)
@@ -53,21 +57,23 @@ func (q *ByteStorageQueue) Enqueue(data []byte) int {
 	However, q.availableSpaceBeforeHead() is 7 (10 - 1), which is greater than or equal to 5.
 	So, the code will set q.tail to 1, wrapping around the tail to the beginning of the circular_queue after the left margin.
 	*/
-	if q.availableSpaceAfterTail() < dataLen+q.headerEntrySize {
-		if q.availableSpaceBeforeHead() >= dataLen+q.headerEntrySize {
+	if q.availableSpaceAfterTail() < dataLen+headerEntrySize {
+		if q.availableSpaceBeforeHead() >= dataLen+headerEntrySize {
 			q.tail = leftMarginIdx
+		} else if q.capacity+headerEntrySize+dataLen >= q.maxCapacity && q.maxCapacity > 0 {
+			return -1, fmt.Errorf("queue is full, max limit of %d reached", q.maxCapacity)
 		} else {
-			q.allocateAdditionalSpace()
+			q.allocateAdditionalSpace(dataLen + headerEntrySize)
 		}
 	}
 	idx := q.tail
 	q.push(data, dataLen)
-	return idx
+	return idx, nil
 }
 
 func (q *ByteStorageQueue) push(data []byte, dataLen int) {
 	binary.LittleEndian.PutUint32(q.headerBuff, uint32(dataLen))
-	q.copy(q.headerBuff, q.headerEntrySize)
+	q.copy(q.headerBuff, headerEntrySize)
 	q.copy(data, dataLen)
 	if q.tail > q.head {
 		q.rightMargin = q.tail
@@ -86,7 +92,7 @@ func (q *ByteStorageQueue) Dequeue() ([]byte, error) {
 		return nil, fmt.Errorf("queue is empty")
 	}
 	data, size := q.peek(q.head)
-	q.head += size + q.headerEntrySize
+	q.head += size + headerEntrySize
 	q.count--
 	if q.head == q.rightMargin {
 		q.head = leftMarginIdx
@@ -129,41 +135,47 @@ func (q *ByteStorageQueue) Capacity() int {
 
 func (q *ByteStorageQueue) peek(idx int) ([]byte, int) {
 	// idx to idx+4 is the header
-	dataLen := int(binary.LittleEndian.Uint32(q.storage[idx : idx+q.headerEntrySize]))
+	dataLen := int(binary.LittleEndian.Uint32(q.storage[idx : idx+headerEntrySize]))
 	// idx+4 to idx+4+dataLen is the data
-	return q.storage[idx+q.headerEntrySize : idx+q.headerEntrySize+dataLen], dataLen
+	return q.storage[idx+headerEntrySize : idx+headerEntrySize+dataLen], dataLen
 }
 
-func (q *ByteStorageQueue) allocateAdditionalSpace() {
-	start := time.Now()
-	q.capacity = q.capacity * 2
-	newStorage := make([]byte, q.capacity)
-	copy(newStorage[leftMarginIdx:], q.storage[q.head:q.rightMargin]) //This effectively copies the contiguous portion of the used data into the new circular_queue.
-
-	newTail := q.rightMargin - q.head + leftMarginIdx
-	if q.tail <= q.head {
-		copy(newStorage[newTail:], q.storage[leftMarginIdx:q.tail])
-		newTail += q.tail - leftMarginIdx
+func (q *ByteStorageQueue) allocateAdditionalSpace(minLen int) {
+	//start := time.Now()
+	if q.capacity < minLen {
+		q.capacity += minLen
 	}
-	q.storage = newStorage
-	q.head = leftMarginIdx
-	q.tail = newTail
-	q.rightMargin = newTail
-	q.logger.Printf("Allocated additional space %d in %v", len(newStorage), time.Since(start))
+	q.capacity = q.capacity * 2
+	if q.capacity > q.maxCapacity && q.maxCapacity > 0 {
+		q.capacity = q.maxCapacity
+	}
+	oldBuff := q.storage
+	q.storage = make([]byte, q.capacity)
+
+	if leftMarginIdx != q.rightMargin {
+		copy(q.storage, oldBuff[:q.rightMargin])
+		if q.tail < q.head {
+			buffLen := q.head - q.tail - headerEntrySize
+			q.push(make([]byte, buffLen), buffLen)
+			q.head = leftMarginIdx
+			q.tail = q.rightMargin
+		}
+	}
+
+	//q.logger.Printf("Allocated additional space %d in %v", len(q.storage), time.Since(start))
 }
 
 // This method calculates the available space in the circular_queue after the current tail position
 // If q.tail = 3, q.head = 5, and q.capacity = 10, the function will return 5 - 3 = 2, because there are 2 free spaces after the tail index.
 // If q.tail = 7, q.head = 2, and q.capacity = 10, the function will return 10 - 7 = 3, because there are 3 free spaces from the tail index to the end of the queue.
 func (q *ByteStorageQueue) availableSpaceAfterTail() int {
-
 	//If the tail position is greater than the head position, it means the used portion is contiguous
 	if q.tail >= q.head {
 		return q.capacity - q.tail
 	}
 	//If the tail position is less than or equal to the head position
 	//it means the used portion of the circular_queue wraps around the end of the circular_queue
-	return q.head - q.tail
+	return q.head - q.tail - minimumCapacity
 }
 
 // tells you how much space is available to write before the current head position, either contiguously or wrapping around,
@@ -181,7 +193,7 @@ func (q *ByteStorageQueue) availableSpaceBeforeHead() int {
 	*/
 
 	if q.tail >= q.head {
-		return q.capacity - leftMarginIdx
+		return q.head - leftMarginIdx - minimumCapacity
 	}
-	return q.head - q.tail
+	return q.head - q.tail - minimumCapacity
 }

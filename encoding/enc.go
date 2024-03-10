@@ -6,30 +6,36 @@ const (
 	timestampSizeInBytes = 8
 	hashSizeInBytes      = 8
 	keySizeInBytes       = 2
-	headerSizeInBytes    = timestampSizeInBytes + hashSizeInBytes + keySizeInBytes
+	// HeaderSizeInBytes is the size of the header in bytes
+	HeaderSizeInBytes = timestampSizeInBytes + hashSizeInBytes + keySizeInBytes
 )
 
-func WrapEntry(timestamp int64, hash uint64, key string, value []byte) []byte {
+func WrapEntry(timestamp int64, hash uint64, key string, value []byte, buffer *[]byte) []byte {
 	var blob []byte
 	keyLen := len(key)
-	blob = make([]byte, headerSizeInBytes+keyLen+len(value))
+	blobLen := len(value) + keyLen + HeaderSizeInBytes
+	if blobLen > len(*buffer) {
+		*buffer = make([]byte, blobLen)
+	}
+	blob = *buffer
+	blob = make([]byte, HeaderSizeInBytes+keyLen+len(value))
 	binary.BigEndian.PutUint64(blob, uint64(timestamp))
 	binary.BigEndian.PutUint64(blob[timestampSizeInBytes:], hash)
 	binary.BigEndian.PutUint16(blob[hashSizeInBytes+timestampSizeInBytes:], uint16(keyLen))
-	copy(blob[headerSizeInBytes:], key)
-	copy(blob[headerSizeInBytes+keyLen:], value)
-	return blob
+	copy(blob[HeaderSizeInBytes:], key)
+	copy(blob[HeaderSizeInBytes+keyLen:], value)
+	return blob[:blobLen]
 }
 
 func ReadEntry(data []byte) []byte {
 	keyLen := binary.BigEndian.Uint16(data[hashSizeInBytes+timestampSizeInBytes:])
-	return data[headerSizeInBytes+keyLen:]
+	return data[HeaderSizeInBytes+keyLen:]
 
 }
 
 func ReadKey(data []byte) string {
 	keyLen := binary.BigEndian.Uint16(data[hashSizeInBytes+timestampSizeInBytes:])
-	return string(data[headerSizeInBytes : headerSizeInBytes+keyLen])
+	return string(data[HeaderSizeInBytes : HeaderSizeInBytes+keyLen])
 }
 
 func ReadTimestamp(data []byte) int64 {

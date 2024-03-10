@@ -1,16 +1,18 @@
 package cache
 
 import (
+	"fmt"
 	"github.com/Vignesh-Rajarajan/ring-buffer-cache/config"
 	"github.com/stretchr/testify/assert"
+	"sync"
 	"testing"
 	"time"
 )
 
 func TestWriteAndGetCache(t *testing.T) {
 	t.Parallel()
-	conf := config.NewConfig(10, 5*time.Second, 10, 256)
-	c := NewCache(conf)
+	conf := config.NewConfig(16, 5*time.Second, 10, 256, 1)
+	c, _ := NewCache(conf)
 
 	value := []byte("hello")
 
@@ -22,8 +24,8 @@ func TestWriteAndGetCache(t *testing.T) {
 
 func TestNotFound(t *testing.T) {
 	t.Parallel()
-	conf := config.NewConfig(10, 5*time.Second, 10, 256)
-	c := NewCache(conf)
+	conf := config.NewConfig(16, 5*time.Second, 10, 256, 1)
+	c, _ := NewCache(conf)
 
 	_, err := c.Get("key")
 	assert.EqualError(t, err, "key not found")
@@ -44,7 +46,7 @@ func (mc *mockClock) set(val int64) {
 func TestKeyEvictionWithTTL(t *testing.T) {
 	t.Parallel()
 	cl := mockClock{value: 0}
-	c := newCache(config.NewConfig(1, time.Second, 10, 256), &cl, hash)
+	c, _ := newCache(config.NewConfig(1, time.Second, 10, 256, 1), &cl, hash)
 	c.Set("key", []byte("value"))
 	cl.set(6)
 	c.Set("key1", []byte("value1"))
@@ -55,7 +57,7 @@ func TestKeyEvictionWithTTL(t *testing.T) {
 func TestKeyUpdate(t *testing.T) {
 	t.Parallel()
 	cl := mockClock{value: 0}
-	c := newCache(config.NewConfig(1, 6*time.Second, 1, 256), &cl, hash)
+	c, _ := newCache(config.NewConfig(1, 6*time.Second, 1, 256, 1), &cl, hash)
 	c.Set("key", []byte("value"))
 	cl.set(5)
 	c.Set("key", []byte("value1"))
@@ -72,8 +74,8 @@ func hashStub(_ []byte) uint64 {
 
 func TestHashCollision(t *testing.T) {
 	t.Parallel()
-	conf := config.NewConfig(10, 5*time.Second, 10, 256)
-	c := NewCache(conf)
+	conf := config.NewConfig(16, 5*time.Second, 10, 256, 1)
+	c, _ := NewCache(conf)
 	c.hash = hashStub
 
 	c.Set("key", []byte("value"))
@@ -88,4 +90,97 @@ func TestHashCollision(t *testing.T) {
 
 	val, err = c.Get("key")
 	assert.EqualError(t, err, "collision detected : both key \"key\" entryKey \"test\" has same hash 5")
+}
+
+func TestEntryBiggerThanMaxCacheSize(t *testing.T) {
+	t.Parallel()
+	conf := config.NewConfig(1, 5*time.Second, 10, 256, 1)
+	conf.HardMaxCacheSize = 1
+	c, _ := NewCache(conf)
+	c.hash = hashStub
+
+	err := c.Set("key", blob('a', 1024*1025))
+	assert.EqualError(t, err, "unable to add entry to cache as maxLimit reached queue is full, max limit of 1048576 reached")
+}
+
+func TestOldestEntryRemoval(t *testing.T) {
+	t.Parallel()
+	conf := config.NewConfig(1, 5*time.Second, 10, 256, 1)
+	c, _ := NewCache(conf)
+
+	c.Set("key1", blob('a', 1024*400))
+	c.Set("key2", blob('b', 1024*400))
+	c.Set("key3", blob('c', 1024*800))
+
+	_, err := c.Get("key1")
+	assert.EqualError(t, err, "key not found")
+	_, err = c.Get("key2")
+	assert.EqualError(t, err, "key not found")
+	val, _ := c.Get("key3")
+	assert.Equal(t, blob('c', 1024*800), val)
+
+}
+
+func TestOnRemoveCallBack(t *testing.T) {
+	t.Parallel()
+	conf := config.NewConfig(1, time.Second, 1, 256, 1)
+	onRemoveInvoked := false
+	conf.OnRemoveCallback = func(key string, value []byte) {
+		onRemoveInvoked = true
+		assert.Equal(t, "key", key)
+		assert.Equal(t, []byte("value"), value)
+	}
+
+	c, _ := NewCache(conf)
+	clock := &mockClock{value: 0}
+	c.clock = clock
+
+	c.Set("key", []byte("value"))
+	clock.set(5)
+	c.Set("key2", []byte("value2"))
+	assert.True(t, onRemoveInvoked)
+}
+
+func TestKeysIterator(t *testing.T) {
+	var wg sync.WaitGroup
+	wg.Add(1)
+	conf := config.NewConfig(1, 6*time.Second, 10, 256, 1)
+	c, _ := NewCache(conf)
+
+	keysCount := 100
+	value := []byte("value")
+
+	for i := 0; i < keysCount; i++ {
+		c.Set(fmt.Sprintf("key-%d", i), value)
+	}
+
+	ch := c.Keys()
+	keys := make(map[string]struct{})
+	go func() {
+	loop:
+		for {
+			select {
+			case entry, ok := <-ch:
+				if !ok {
+					break loop
+				}
+				keys[entry.Key] = struct{}{}
+			case <-time.After(time.Second):
+				break loop
+			}
+		}
+		wg.Done()
+	}()
+
+	wg.Wait()
+	assert.Equal(t, keysCount, len(keys))
+
+}
+
+func blob(b byte, length int) []byte {
+	buff := make([]byte, length)
+	for idx := range buff {
+		buff[idx] = b
+	}
+	return buff
 }
