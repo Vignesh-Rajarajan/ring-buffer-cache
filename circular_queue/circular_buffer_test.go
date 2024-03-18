@@ -128,6 +128,23 @@ func blob(b byte, length int) []byte {
 	return buff
 }
 
+func TestReset(t *testing.T) {
+	queue := NewByteStorageQueue(100, 0, logger)
+	queue.Enqueue([]byte("hello"))
+	queue.Enqueue([]byte("world"))
+	queue.Enqueue([]byte("hello"))
+	queue.Reset()
+
+	val, err := queue.Peek()
+	assert.Error(t, err)
+	assert.Nil(t, val)
+
+	queue.Enqueue([]byte("hello"))
+	val, err = queue.Peek()
+	assert.NoError(t, err)
+	assert.Equal(t, []byte("hello"), val)
+}
+
 func pop(q *ByteStorageQueue) []byte {
 	val, _ := q.Dequeue()
 	return val

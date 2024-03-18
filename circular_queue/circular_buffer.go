@@ -34,7 +34,7 @@ func NewByteStorageQueue(capacity, maxCapacity int, logger *log.Logger) *ByteSto
 	return &ByteStorageQueue{
 		storage:     make([]byte, capacity),
 		capacity:    capacity,
-		headerBuff:  make([]byte, 4),
+		headerBuff:  make([]byte, headerEntrySize),
 		head:        leftMarginIdx,
 		tail:        leftMarginIdx,
 		logger:      logger,
@@ -196,4 +196,13 @@ func (q *ByteStorageQueue) availableSpaceBeforeHead() int {
 		return q.head - leftMarginIdx - minimumCapacity
 	}
 	return q.head - q.tail - minimumCapacity
+}
+
+func (q *ByteStorageQueue) Reset() {
+	q.mutex.Lock()
+	defer q.mutex.Unlock()
+	q.head = leftMarginIdx
+	q.tail = leftMarginIdx
+	q.count = 0
+	q.rightMargin = leftMarginIdx
 }

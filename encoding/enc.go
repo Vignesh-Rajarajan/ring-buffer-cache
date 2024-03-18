@@ -29,13 +29,17 @@ func WrapEntry(timestamp int64, hash uint64, key string, value []byte, buffer *[
 
 func ReadEntry(data []byte) []byte {
 	keyLen := binary.BigEndian.Uint16(data[hashSizeInBytes+timestampSizeInBytes:])
-	return data[HeaderSizeInBytes+keyLen:]
+	dst := make([]byte, len(data)-int(HeaderSizeInBytes+keyLen))
+	copy(dst, data[HeaderSizeInBytes+keyLen:])
+	return dst
 
 }
 
 func ReadKey(data []byte) string {
 	keyLen := binary.BigEndian.Uint16(data[hashSizeInBytes+timestampSizeInBytes:])
-	return string(data[HeaderSizeInBytes : HeaderSizeInBytes+keyLen])
+	dst := make([]byte, keyLen)
+	copy(dst, data[HeaderSizeInBytes:HeaderSizeInBytes+keyLen])
+	return string(dst)
 }
 
 func ReadTimestamp(data []byte) int64 {
